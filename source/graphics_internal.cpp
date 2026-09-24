@@ -91,7 +91,8 @@ bool initializeImGUI() {
 	const VkDescriptorPoolCreateInfo descriptor_pool = {
 		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
 		.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
-		.maxSets = uint32_t(vk_swapchain_images.size()),
+		.maxSets = IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE +
+		           IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE,
 		.poolSizeCount = sizeof(descriptor_pool_sizes) / sizeof(descriptor_pool_sizes[0]),
 		.pPoolSizes = descriptor_pool_sizes,
 	};
@@ -462,8 +463,17 @@ bool initialize(GLFWwindow* const window) {
 	}
 
 	vkb::SwapchainBuilder sb(vkb_device);
+	int framebuffer_width = 0;
+	int framebuffer_height = 0;
+	glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
+	if (framebuffer_width <= 0 || framebuffer_height <= 0) {
+		std::cerr << "Invalid GLFW framebuffer size\n";
+		return false;
+	}
 
-	auto sb_result = sb.use_default_format_selection()
+	auto sb_result = sb.set_desired_extent(uint32_t(framebuffer_width),
+	                                       uint32_t(framebuffer_height))
+	                   .use_default_format_selection()
 					   .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
 					   .use_default_image_usage_flags()
 					   .build();
@@ -786,7 +796,7 @@ void submitAndPresent() {
 	    result == VK_SUBOPTIMAL_KHR ||
 	    vk_swapchain_resize_require) {
 		rebuildSwapchain(vk_swapchain_resize_width, vk_swapchain_resize_height);
-	} else {
+	} else if (result != VK_SUCCESS) {
 		std::cerr << "Failed to present Vulkan swapchain image\n";
 	}
 }
