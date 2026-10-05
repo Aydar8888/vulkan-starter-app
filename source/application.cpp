@@ -26,7 +26,7 @@ void render(const graphics::internal::FrameData& fd) {
 	};
 
 	const VkClearValue clear_values[] = {
-		{ .color = { { 0.05F, 0.05F, 0.08F, 1.0F } } },
+		{ .color = { { 0.02F, 0.08F, 0.20F, 1.0F } } },
 		{ .depthStencil = { 1.0F, 0 } },
 	};
 
