@@ -1,11 +1,23 @@
 #version 450
 
-layout(location = 0) out vec3 vertexColor;
+layout(set = 0, binding = 0, std140) uniform Scene {
+    mat4 viewProjection;
+    vec4 cameraPosition;
+    vec4 ambient;
+    vec4 directionalDirection;
+    vec4 directionalColorIntensity;
+    ivec4 lightCounts;
+} scene;
 
-layout(push_constant) uniform DrawData {
-    mat4 mvp;
-    vec4 tint;
-} drawData;
+layout(set = 1, binding = 0, std140) uniform Model {
+    mat4 transform;
+    mat4 normalTransform;
+    vec4 albedo;
+    vec4 specularShininess;
+} model;
+
+layout(location = 0) out vec3 worldPosition;
+layout(location = 1) out vec3 worldNormal;
 
 const vec3 positions[8] = vec3[8](
     vec3(-1, -1, -1), vec3( 1, -1, -1),
@@ -24,7 +36,15 @@ const int indices[36] = int[36](
 );
 
 void main() {
-    vec3 position = positions[indices[gl_VertexIndex]];
-    gl_Position = drawData.mvp * vec4(position, 1.0);
-    vertexColor = (position * 0.5 + 0.5) * drawData.tint.rgb;
+    int triangleStart = (gl_VertexIndex / 3) * 3;
+    vec3 a = positions[indices[triangleStart]];
+    vec3 b = positions[indices[triangleStart + 1]];
+    vec3 c = positions[indices[triangleStart + 2]];
+    vec3 localNormal = normalize(cross(b - a, c - a));
+
+    vec3 localPosition = positions[indices[gl_VertexIndex]];
+    vec4 world = model.transform * vec4(localPosition, 1.0);
+    worldPosition = world.xyz;
+    worldNormal = normalize(mat3(model.normalTransform) * localNormal);
+    gl_Position = scene.viewProjection * world;
 }
