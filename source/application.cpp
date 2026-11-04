@@ -8,7 +8,10 @@
 #include <iostream>
 #include <vector>
 #include <algorithm>
+#include <array>
 #include <imgui.h>
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
 namespace application {
 namespace {
@@ -71,6 +74,26 @@ struct Buffer {
     VkDeviceSize size = 0;
 };
 
+struct Vertex {
+    float position[3];
+    float normal[3];
+    float uv[2];
+};
+
+constexpr std::array<Vertex, 24> cube_vertices = {{
+    {{-1,-1,-1},{ 0, 0,-1},{0,1}}, {{-1, 1,-1},{ 0, 0,-1},{0,0}}, {{ 1, 1,-1},{ 0, 0,-1},{1,0}}, {{ 1,-1,-1},{ 0, 0,-1},{1,1}},
+    {{-1,-1, 1},{ 0, 0, 1},{0,1}}, {{ 1,-1, 1},{ 0, 0, 1},{1,1}}, {{ 1, 1, 1},{ 0, 0, 1},{1,0}}, {{-1, 1, 1},{ 0, 0, 1},{0,0}},
+    {{-1,-1,-1},{ 0,-1, 0},{0,1}}, {{ 1,-1,-1},{ 0,-1, 0},{1,1}}, {{ 1,-1, 1},{ 0,-1, 0},{1,0}}, {{-1,-1, 1},{ 0,-1, 0},{0,0}},
+    {{-1, 1,-1},{ 0, 1, 0},{0,1}}, {{-1, 1, 1},{ 0, 1, 0},{0,0}}, {{ 1, 1, 1},{ 0, 1, 0},{1,0}}, {{ 1, 1,-1},{ 0, 1, 0},{1,1}},
+    {{-1,-1,-1},{-1, 0, 0},{0,1}}, {{-1,-1, 1},{-1, 0, 0},{1,1}}, {{-1, 1, 1},{-1, 0, 0},{1,0}}, {{-1, 1,-1},{-1, 0, 0},{0,0}},
+    {{ 1,-1,-1},{ 1, 0, 0},{0,1}}, {{ 1, 1,-1},{ 1, 0, 0},{0,0}}, {{ 1, 1, 1},{ 1, 0, 0},{1,0}}, {{ 1,-1, 1},{ 1, 0, 0},{1,1}},
+}};
+constexpr std::array<uint16_t, 36> cube_indices = {{
+    0,1,2, 0,2,3, 4,5,6, 4,6,7, 8,9,10, 8,10,11,
+    12,13,14, 12,14,15, 16,17,18, 16,18,19, 20,21,22, 20,22,23,
+}};
+constexpr uint32_t model_count = 1;
+
 struct PointLight {
     float position[3] = {2.0f, 2.0f, 2.0f};
     float color[3] = {1.0f, 0.65f, 0.35f};
@@ -97,6 +120,13 @@ Buffer scene_buffer;
 Buffer model_buffer;
 Buffer point_buffer;
 Buffer spot_buffer;
+Buffer vertex_buffer;
+Buffer index_buffer;
+VkDeviceSize model_stride = 0;
+VkImage texture_image = VK_NULL_HANDLE;
+VmaAllocation texture_allocation = VK_NULL_HANDLE;
+VkImageView texture_view = VK_NULL_HANDLE;
+VkSampler texture_sampler = VK_NULL_HANDLE;
 
 float position[3] = {0.0f, 0.0f, 0.0f};
 float rotation[3] = {25.0f, 35.0f, 0.0f};
@@ -109,7 +139,6 @@ float ambient_color[3] = {0.12f, 0.12f, 0.15f};
 float directional_direction[3] = {-0.5f, -1.0f, -0.6f};
 float directional_color[3] = {1.0f, 1.0f, 1.0f};
 float directional_intensity = 1.3f;
-float albedo[3] = {0.65f, 0.72f, 0.95f};
 float specular_color[3] = {1.0f, 1.0f, 1.0f};
 float shininess = 48.0f;
 std::vector<PointLight> point_lights = {PointLight{}};
@@ -226,7 +255,8 @@ Vec4 direction4(const float value[3], float w) {
     return {value[0] / length, value[1] / length, value[2] / length, w};
 }
 
-bool createBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage) {
+bool createBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage,
+                  bool device_local = false) {
     auto& context = graphics::internal::context;
     const VkBufferCreateInfo buffer_info = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -235,9 +265,10 @@ bool createBuffer(Buffer& buffer, VkDeviceSize size, VkBufferUsageFlags usage) {
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
     const VmaAllocationCreateInfo allocation_info = {
-        .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-                 VMA_ALLOCATION_CREATE_MAPPED_BIT,
-        .usage = VMA_MEMORY_USAGE_AUTO,
+        .flags = device_local ? 0u : VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                                      VMA_ALLOCATION_CREATE_MAPPED_BIT,
+        .usage = device_local ? VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE : VMA_MEMORY_USAGE_AUTO,
+        .requiredFlags = device_local ? VkMemoryPropertyFlags(VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) : 0u,
     };
     VmaAllocationInfo result{};
     if (vmaCreateBuffer(context.allocator, &buffer_info, &allocation_info,
@@ -264,6 +295,183 @@ void writeBuffer(const Buffer& buffer, const void* data, VkDeviceSize size) {
                        buffer.allocation, 0, size);
 }
 
+void writeBufferAt(const Buffer& buffer, VkDeviceSize offset,
+                   const void* data, VkDeviceSize size) {
+    std::memcpy(static_cast<char*>(buffer.mapped) + offset, data,
+                static_cast<size_t>(size));
+    vmaFlushAllocation(graphics::internal::context.allocator,
+                       buffer.allocation, offset, size);
+}
+
+bool beginTransfer(VkCommandPool& pool, VkCommandBuffer& command) {
+    auto& context = graphics::internal::context;
+    const VkCommandPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .queueFamilyIndex = context.graphics_queue_index,
+    };
+    if (vkCreateCommandPool(context.device, &pool_info, nullptr, &pool) != VK_SUCCESS)
+        return false;
+    const VkCommandBufferAllocateInfo allocation = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    if (vkAllocateCommandBuffers(context.device, &allocation, &command) != VK_SUCCESS) {
+        vkDestroyCommandPool(context.device, pool, nullptr);
+        pool = VK_NULL_HANDLE;
+        return false;
+    }
+    const VkCommandBufferBeginInfo begin = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (vkBeginCommandBuffer(command, &begin) != VK_SUCCESS) {
+        vkDestroyCommandPool(context.device, pool, nullptr);
+        pool = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+
+bool endTransfer(VkCommandPool pool, VkCommandBuffer command) {
+    auto& context = graphics::internal::context;
+    bool ok = vkEndCommandBuffer(command) == VK_SUCCESS;
+    if (ok) {
+        const VkSubmitInfo submit = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &command,
+        };
+        ok = vkQueueSubmit(context.graphics_queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS;
+        if (ok) ok = vkQueueWaitIdle(context.graphics_queue) == VK_SUCCESS;
+    }
+    vkDestroyCommandPool(context.device, pool, nullptr);
+    return ok;
+}
+
+bool uploadDeviceBuffer(Buffer& target, const void* data, VkDeviceSize size,
+                        VkBufferUsageFlags usage) {
+    Buffer staging;
+    if (!createBuffer(staging, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) return false;
+    writeBuffer(staging, data, size);
+    if (!createBuffer(target, size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true)) {
+        destroyBuffer(staging);
+        return false;
+    }
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    if (!beginTransfer(pool, command)) {
+        destroyBuffer(staging);
+        return false;
+    }
+    const VkBufferCopy copy = {.size = size};
+    vkCmdCopyBuffer(command, staging.handle, target.handle, 1, &copy);
+    const bool ok = endTransfer(pool, command);
+    destroyBuffer(staging);
+    return ok;
+}
+
+bool createTexture() {
+    auto& context = graphics::internal::context;
+    int width = 0, height = 0, channels = 0;
+    stbi_uc* pixels = stbi_load("textures/cube.png", &width, &height, &channels, 4);
+    if (!pixels || width <= 0 || height <= 0) {
+        std::cerr << "Cannot load textures/cube.png: " << stbi_failure_reason() << '\n';
+        stbi_image_free(pixels);
+        return false;
+    }
+    const VkDeviceSize bytes = VkDeviceSize(width) * VkDeviceSize(height) * 4;
+    Buffer staging;
+    if (!createBuffer(staging, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)) {
+        stbi_image_free(pixels);
+        return false;
+    }
+    writeBuffer(staging, pixels, bytes);
+    stbi_image_free(pixels);
+
+    const VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .extent = {uint32_t(width), uint32_t(height), 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+    const VmaAllocationCreateInfo alloc = {
+        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    };
+    if (vmaCreateImage(context.allocator, &image_info, &alloc,
+                       &texture_image, &texture_allocation, nullptr) != VK_SUCCESS) {
+        destroyBuffer(staging);
+        return false;
+    }
+
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkCommandBuffer command = VK_NULL_HANDLE;
+    if (!beginTransfer(pool, command)) {
+        destroyBuffer(staging);
+        return false;
+    }
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = texture_image,
+        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+    };
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                         1, &barrier);
+    const VkBufferImageCopy copy = {
+        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .imageExtent = {uint32_t(width), uint32_t(height), 1},
+    };
+    vkCmdCopyBufferToImage(command, staging.handle, texture_image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+                         1, &barrier);
+    const bool transferred = endTransfer(pool, command);
+    destroyBuffer(staging);
+    if (!transferred) return false;
+
+    const VkImageViewCreateInfo view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = texture_image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = VK_FORMAT_R8G8B8A8_SRGB,
+        .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+    };
+    if (vkCreateImageView(context.device, &view_info, nullptr, &texture_view) != VK_SUCCESS)
+        return false;
+    const VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .maxLod = 0.0f,
+    };
+    return vkCreateSampler(context.device, &sampler_info, nullptr,
+                           &texture_sampler) == VK_SUCCESS;
+}
+
 void updateBufferDescriptor(VkDescriptorSet set, uint32_t binding,
                             VkDescriptorType type, const Buffer& buffer) {
     const VkDescriptorBufferInfo info = {
@@ -286,11 +494,16 @@ void destroyResources() {
     auto& context = graphics::internal::context;
     if (pipeline) vkDestroyPipeline(context.device, pipeline, nullptr);
     if (pipeline_layout) vkDestroyPipelineLayout(context.device, pipeline_layout, nullptr);
+    if (texture_sampler) vkDestroySampler(context.device, texture_sampler, nullptr);
+    if (texture_view) vkDestroyImageView(context.device, texture_view, nullptr);
+    if (texture_image) vmaDestroyImage(context.allocator, texture_image, texture_allocation);
     if (descriptor_pool) vkDestroyDescriptorPool(context.device, descriptor_pool, nullptr);
     destroyBuffer(scene_buffer);
     destroyBuffer(model_buffer);
     destroyBuffer(point_buffer);
     destroyBuffer(spot_buffer);
+    destroyBuffer(vertex_buffer);
+    destroyBuffer(index_buffer);
     if (scene_set_layout) vkDestroyDescriptorSetLayout(context.device, scene_set_layout, nullptr);
     if (model_set_layout) vkDestroyDescriptorSetLayout(context.device, model_set_layout, nullptr);
     pipeline = VK_NULL_HANDLE;
@@ -300,6 +513,10 @@ void destroyResources() {
     model_set_layout = VK_NULL_HANDLE;
     scene_set = VK_NULL_HANDLE;
     model_set = VK_NULL_HANDLE;
+    texture_sampler = VK_NULL_HANDLE;
+    texture_view = VK_NULL_HANDLE;
+    texture_image = VK_NULL_HANDLE;
+    texture_allocation = VK_NULL_HANDLE;
 }
 
 bool initializeDescriptors() {
@@ -335,16 +552,24 @@ bool initializeDescriptors() {
         return false;
     }
 
-    const VkDescriptorSetLayoutBinding model_binding = {
-        .binding = 0,
-        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+    const VkDescriptorSetLayoutBinding model_bindings[] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
     };
     const VkDescriptorSetLayoutCreateInfo model_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings = &model_binding,
+        .bindingCount = 2,
+        .pBindings = model_bindings,
     };
     if (vkCreateDescriptorSetLayout(context.device, &model_info, nullptr,
                                     &model_set_layout) != VK_SUCCESS) {
@@ -353,13 +578,15 @@ bool initializeDescriptors() {
     }
 
     const VkDescriptorPoolSize pool_sizes[] = {
-        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 2},
+        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1},
+        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .descriptorCount = 1},
         {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2},
+        {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1},
     };
     const VkDescriptorPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .maxSets = 2,
-        .poolSizeCount = 2,
+        .poolSizeCount = 4,
         .pPoolSizes = pool_sizes,
     };
     if (vkCreateDescriptorPool(context.device, &pool_info, nullptr,
@@ -368,10 +595,25 @@ bool initializeDescriptors() {
         return false;
     }
 
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(context.physical_device, &properties);
+    const VkDeviceSize alignment = std::max<VkDeviceSize>(
+        1, properties.limits.minUniformBufferOffsetAlignment);
+    model_stride = ((sizeof(ModelData) + alignment - 1) / alignment) * alignment;
+
     if (!createBuffer(scene_buffer, sizeof(SceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) ||
-        !createBuffer(model_buffer, sizeof(ModelData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) ||
+        !createBuffer(model_buffer, model_stride * model_count, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) ||
         !createBuffer(point_buffer, sizeof(PointLightData), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) ||
         !createBuffer(spot_buffer, sizeof(SpotLightData), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)) {
+        return false;
+    }
+
+    if (!uploadDeviceBuffer(vertex_buffer, cube_vertices.data(), sizeof(cube_vertices),
+                            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
+        !uploadDeviceBuffer(index_buffer, cube_indices.data(), sizeof(cube_indices),
+                            VK_BUFFER_USAGE_INDEX_BUFFER_BIT) ||
+        !createTexture()) {
+        std::cerr << "Cannot upload cube geometry or texture to GPU\n";
         return false;
     }
 
@@ -392,7 +634,35 @@ bool initializeDescriptors() {
     updateBufferDescriptor(scene_set, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, scene_buffer);
     updateBufferDescriptor(scene_set, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, point_buffer);
     updateBufferDescriptor(scene_set, 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, spot_buffer);
-    updateBufferDescriptor(model_set, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, model_buffer);
+    const VkDescriptorBufferInfo model_buffer_info = {
+        .buffer = model_buffer.handle,
+        .offset = 0,
+        .range = sizeof(ModelData),
+    };
+    const VkDescriptorImageInfo texture_info = {
+        .sampler = texture_sampler,
+        .imageView = texture_view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    const VkWriteDescriptorSet model_writes[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = model_set,
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,
+            .pBufferInfo = &model_buffer_info,
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = model_set,
+            .dstBinding = 1,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &texture_info,
+        },
+    };
+    vkUpdateDescriptorSets(context.device, 2, model_writes, 0, nullptr);
     return true;
 }
 
@@ -496,8 +766,22 @@ bool initialize() {
         },
     };
 
+    const VkVertexInputBindingDescription vertex_binding = {
+        .binding = 0,
+        .stride = sizeof(Vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    const VkVertexInputAttributeDescription vertex_attributes[] = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, position)},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(Vertex, normal)},
+        {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(Vertex, uv)},
+    };
     const VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &vertex_binding,
+        .vertexAttributeDescriptionCount = 3,
+        .pVertexAttributeDescriptions = vertex_attributes,
     };
 
     const VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -617,7 +901,7 @@ void update(double time) {
         ImGui::SliderFloat("Vertical amplitude", &vertical_amplitude, 0.0f, 1.0f);
     }
     if (ImGui::CollapsingHeader("Material", ImGuiTreeNodeFlags_DefaultOpen)) {
-        ImGui::ColorEdit3("Albedo", albedo);
+        ImGui::TextUnformatted("Albedo: textures/cube.png");
         ImGui::ColorEdit3("Specular color", specular_color);
         ImGui::SliderFloat("Shininess", &shininess, 2.0f, 128.0f);
     }
@@ -759,13 +1043,13 @@ void render(const graphics::internal::FrameData& fd) {
     const ModelData model_data = {
         .transform = model,
         .normal_transform = normal_transform,
-        .albedo = {albedo[0], albedo[1], albedo[2], 1.0f},
+        .albedo = {1.0f, 1.0f, 1.0f, 1.0f},
         .specular_shininess = {
             specular_color[0], specular_color[1], specular_color[2], shininess
         },
     };
     writeBuffer(scene_buffer, &scene_data, sizeof(scene_data));
-    writeBuffer(model_buffer, &model_data, sizeof(model_data));
+    writeBufferAt(model_buffer, 0, &model_data, sizeof(model_data));
 
     const VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -811,12 +1095,16 @@ void render(const graphics::internal::FrameData& fd) {
 
     vkCmdSetViewport(fd.command_buffer, 0, 1, &viewport);
     vkCmdSetScissor(fd.command_buffer, 0, 1, &scissor);
+    const VkDeviceSize vertex_offset = 0;
+    vkCmdBindVertexBuffers(fd.command_buffer, 0, 1, &vertex_buffer.handle, &vertex_offset);
+    vkCmdBindIndexBuffer(fd.command_buffer, index_buffer.handle, 0, VK_INDEX_TYPE_UINT16);
     const VkDescriptorSet sets[] = {scene_set, model_set};
+    const uint32_t dynamic_offset = 0;
     vkCmdBindDescriptorSets(
         fd.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
-        0, 2, sets, 0, nullptr
+        0, 2, sets, 1, &dynamic_offset
     );
-    vkCmdDraw(fd.command_buffer, 36, 1, 0, 0);
+    vkCmdDrawIndexed(fd.command_buffer, uint32_t(cube_indices.size()), 1, 0, 0, 0);
 
     vkCmdEndRenderPass(fd.command_buffer);
     vkEndCommandBuffer(fd.command_buffer);

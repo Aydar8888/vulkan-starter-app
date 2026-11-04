@@ -35,19 +35,22 @@ layout(set = 1, binding = 0, std140) uniform Model {
     vec4 albedo;
     vec4 specularShininess;
 } model;
+layout(set = 1, binding = 1) uniform sampler2D albedoTexture;
 
 layout(location = 0) in vec3 worldPosition;
 layout(location = 1) in vec3 worldNormal;
+layout(location = 2) in vec2 textureUV;
 layout(location = 0) out vec4 outColor;
 
-vec3 blinnPhong(vec3 lightDirection, vec3 lightColor, vec3 normal, vec3 viewDirection) {
+vec3 blinnPhong(vec3 lightDirection, vec3 lightColor, vec3 normal,
+                vec3 viewDirection, vec3 albedo) {
     float diffuse = max(dot(normal, lightDirection), 0.0);
     vec3 halfVector = normalize(lightDirection + viewDirection);
     float specular = diffuse > 0.0
         ? pow(max(dot(normal, halfVector), 0.0), model.specularShininess.w)
         : 0.0;
     return lightColor * (
-        model.albedo.rgb * diffuse +
+        albedo * diffuse +
         model.specularShininess.rgb * specular
     );
 }
@@ -55,13 +58,14 @@ vec3 blinnPhong(vec3 lightDirection, vec3 lightColor, vec3 normal, vec3 viewDire
 void main() {
     vec3 normal = normalize(worldNormal);
     vec3 viewDirection = normalize(scene.cameraPosition.xyz - worldPosition);
-    vec3 color = scene.ambient.rgb * model.albedo.rgb;
+    vec3 albedo = texture(albedoTexture, textureUV).rgb;
+    vec3 color = scene.ambient.rgb * albedo;
 
     vec3 directionalLight = normalize(-scene.directionalDirection.xyz);
     color += blinnPhong(
         directionalLight,
         scene.directionalColorIntensity.rgb * scene.directionalColorIntensity.w,
-        normal, viewDirection
+        normal, viewDirection, albedo
     );
 
     for (int i = 0; i < scene.lightCounts.x; ++i) {
@@ -70,7 +74,7 @@ void main() {
         vec3 direction = normalize(offset);
         vec3 lightColor = pointLights.items[i].colorIntensity.rgb *
             (pointLights.items[i].colorIntensity.w / distanceSquared);
-        color += blinnPhong(direction, lightColor, normal, viewDirection);
+        color += blinnPhong(direction, lightColor, normal, viewDirection, albedo);
     }
 
     for (int i = 0; i < scene.lightCounts.y; ++i) {
@@ -85,7 +89,7 @@ void main() {
         float cone = smoothstep(outer, max(inner, outer + 0.0001), angleCos);
         vec3 lightColor = spotLights.items[i].colorIntensity.rgb *
             (spotLights.items[i].colorIntensity.w * cone / distanceSquared);
-        color += blinnPhong(direction, lightColor, normal, viewDirection);
+        color += blinnPhong(direction, lightColor, normal, viewDirection, albedo);
     }
 
     outColor = vec4(color, 1.0);
