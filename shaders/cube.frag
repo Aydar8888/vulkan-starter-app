@@ -2,6 +2,7 @@
 
 layout(set = 0, binding = 0, std140) uniform Scene {
     mat4 viewProjection;
+    mat4 lightViewProjection;
     vec4 cameraPosition;
     vec4 ambient;
     vec4 directionalDirection;
@@ -29,6 +30,8 @@ layout(set = 0, binding = 2, std430) readonly buffer SpotLights {
     SpotLight items[];
 } spotLights;
 
+layout(set = 0, binding = 3) uniform sampler2DShadow shadowMap;
+
 layout(set = 1, binding = 0, std140) uniform Model {
     mat4 transform;
     mat4 normalTransform;
@@ -40,6 +43,7 @@ layout(set = 1, binding = 1) uniform sampler2D albedoTexture;
 layout(location = 0) in vec3 worldPosition;
 layout(location = 1) in vec3 worldNormal;
 layout(location = 2) in vec2 textureUV;
+layout(location = 3) in vec4 lightPosition;
 layout(location = 0) out vec4 outColor;
 
 vec3 blinnPhong(vec3 lightDirection, vec3 lightColor, vec3 normal,
@@ -58,11 +62,20 @@ vec3 blinnPhong(vec3 lightDirection, vec3 lightColor, vec3 normal,
 void main() {
     vec3 normal = normalize(worldNormal);
     vec3 viewDirection = normalize(scene.cameraPosition.xyz - worldPosition);
-    vec3 albedo = texture(albedoTexture, textureUV).rgb;
+    // Material alpha is the weight of the albedo texture: 1 for the cube, 0 for the floor.
+    vec3 albedo = mix(model.albedo.rgb, texture(albedoTexture, textureUV).rgb, model.albedo.a);
     vec3 color = scene.ambient.rgb * albedo;
 
+    vec3 lightNdc = lightPosition.xyz / lightPosition.w;
+    vec2 shadowUV = lightNdc.xy * 0.5 + 0.5;
+    // Vulkan already maps depth to [0, 1]; only X and Y need rescaling.
+    float sunVisibility = 1.0;
+    if (lightNdc.z > 0.0 && lightNdc.z < 1.0 &&
+        all(greaterThanEqual(shadowUV, vec2(0.0))) && all(lessThan(shadowUV, vec2(1.0)))) {
+        sunVisibility = textureLod(shadowMap, vec3(shadowUV, lightNdc.z), 0.0);
+    }
     vec3 directionalLight = normalize(-scene.directionalDirection.xyz);
-    color += blinnPhong(
+    color += sunVisibility * blinnPhong(
         directionalLight,
         scene.directionalColorIntensity.rgb * scene.directionalColorIntensity.w,
         normal, viewDirection, albedo

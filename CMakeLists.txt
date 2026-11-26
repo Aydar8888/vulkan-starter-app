@@ -90,7 +90,7 @@ target_sources(${PROJECT_NAME} PRIVATE
 )
 
 # Compile shaders
-find_program(GLSLC_FOUND glslc)
+find_program(GLSLC_FOUND glslc REQUIRED)
 if(GLSLC_FOUND)
 	set(_SHADER_BINARIES)
 
@@ -101,7 +101,7 @@ if(GLSLC_FOUND)
 
 		add_custom_command(
 			OUTPUT ${SHADER_BINARY_PATH}
-			COMMAND glslc ${SHADER_SOURCE} -o ${SHADER_BINARY_PATH}
+			COMMAND ${GLSLC_FOUND} ${SHADER_SOURCE} -o ${SHADER_BINARY_PATH}
 			DEPENDS ${SHADER_SOURCE}
 			COMMENT "Compiling ${SHADER_FILE} shader"
 		)
@@ -114,6 +114,7 @@ if(GLSLC_FOUND)
 
 	compile_shader(cube.vert)
 	compile_shader(cube.frag)
+	compile_shader(shadow.vert)
 
 	add_custom_target(shaders DEPENDS ${_SHADER_BINARIES})
 	add_dependencies(${PROJECT_NAME} shaders)
